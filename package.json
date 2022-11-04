@@ -1,0 +1,30 @@
+{
+  "name": "melon-fire",
+  "version": "1.0.0",
+  "description": "WatermelonDB Firestore sync",
+  "main": "index.ts",
+  "dependencies": {
+    "@react-native-firebase/firestore": "^15.7.0",
+    "@nozbe/watermelondb": "^0.24.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fivecar/melon-fire.git"
+  },
+  "keywords": [
+    "watermelondb",
+    "watermelon",
+    "firestore",
+    "firebase",
+    "sync"
+  ],
+  "author": "Philip Su",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/fivecar/melon-fire/issues"
+  },
+  "homepage": "https://github.com/fivecar/melon-fire#readme"
+}
