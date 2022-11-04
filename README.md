@@ -27,8 +27,8 @@ import { Database } from  "@nozbe/watermelondb";
 import syncMelonFire from "melon-fire";
 
 async function onSyncButtonPushOrRandomTimer(
-	db: Database,
-	userId: string,
+  db: Database,
+  userId: string,
 ) {
   const syncDocRef = firestore()
     .collections("users")
