@@ -33,7 +33,7 @@ async function onSyncButtonPushOrRandomTimer(
   const syncDocRef = firestore()
     .collections("users")
     .doc(userId);
-	return await syncMelonFire(db, syncDocRef);
+  return await syncMelonFire(db, syncDocRef);
 }
 ```
 
