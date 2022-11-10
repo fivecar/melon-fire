@@ -281,16 +281,28 @@ async function pushAllChanges(
         trans.set(baseDoc.collection(table).doc(rec.id), rec);
       });
 
-      tableDeletes[table] = changes[table].deleted;
+      if (changes[table].deleted.length) {
+        tableDeletes[table] = changes[table].deleted;
+      }
     });
 
-    const updatedBase: Omit<MelonFireBaseDoc, "melonBatchTokens"> = {
+    const dels: Pick<MelonFireBaseDoc, "melonDeletes"> | {} = Object.keys(
+      tableDeletes,
+    ).length
+      ? {
+          melonDeletes: {
+            ...existingDoc?.melonDeletes,
+            [revision]: tableDeletes,
+          },
+        }
+      : {};
+    const updatedBase: Omit<
+      MelonFireBaseDoc,
+      "melonBatchTokens" | "melonDeletes"
+    > = {
       melonLatestRevision: revision,
       melonLatestDate: new Date().toISOString(),
-      melonDeletes: {
-        ...existingDoc?.melonDeletes,
-        [revision]: tableDeletes,
-      },
+      ...dels,
     };
 
     // This is why you need less than MAX_TRANSACTION_WRITES of changes: you
