@@ -13,13 +13,22 @@ import firestore, {
 interface MelonFireRoot {
   melonLatestRevision?: number;
   melonLatestDate?: string; // ISO
-  melonDeletes?: TableDeletesByRevision;
 }
 
 interface MelonFireBaseDoc extends MelonFireRoot {
   // For each revision that was a big batch, its firestore docId is mapped in
   // this object. You can then find the batchDoc at baseDoc/melonBatches/[token]
   melonBatchTokens: { [revision: string]: string };
+}
+
+interface MelonBatchDoc extends MelonFireRoot {
+  // We've made a compromise here by storing deleted IDs from a batch all within
+  // its main BatchDoc. Firestore's 1MB limit means that you can hit an issue if
+  // you store, say, a few tens of thousands of deletes within one sync. If
+  // you'd like to overcome that limit, you'd instead have to store each delete
+  // in its own document under BatchDoc, which seems over the top. Some of this
+  // is about how much storage and $ you're willing to pay on a regular basis.
+  deletes: TableDeletes;
 }
 
 interface ChangeRecord {
@@ -30,17 +39,23 @@ interface ChangeRecord {
   _changed?: string; // same - need to del.
 }
 
+// We store each revision's deletes as its own document. This makes it much less
+// likely to run into Firestore's 1MB limit.
+interface DeleteRecord {
+  revision: number;
+  deletes: TableDeletes;
+}
+
 interface TableDeletes {
   [tableName: string]: string[]; // ids of records to delete
 }
-
-type TableDeletesByRevision = { [revision: string]: TableDeletes };
 
 type ChangeType = "created" | "updated" | "deleted";
 type ChangeWithId = Partial<ChangeRecord> & Pick<ChangeRecord, "id">;
 
 const MAX_TRANSACTION_WRITES = 500; // From firebase docs
 const BATCH_COLLECTION = "melonBatches";
+const DELETE_COLLECTION = "melonDeletes"; // Contains DeleteRecord docs
 const MIN_REVISION = 1;
 
 export default async function syncMelonFire(
@@ -122,10 +137,35 @@ async function pullChanges(
       const token = existingDoc!.melonBatchTokens[end.toString()];
       const root = baseDoc.collection(BATCH_COLLECTION).doc(token);
 
-      await mergeChanges(root, start, end, tables, changes);
+      const [rootSnap] = await Promise.all([
+        root.get(),
+        mergeCreatesAndUpdates(root, start, end, tables, changes),
+      ]);
       end++;
+
+      // Now add deletions from this batch
+      const rootDoc = rootSnap.data() as MelonBatchDoc;
+      Object.keys(rootDoc.deletes).forEach(table => {
+        changes[table].deleted.push(...rootDoc.deletes[table]);
+      });
     } else {
-      await mergeChanges(baseDoc, start, end, tables, changes);
+      await mergeCreatesAndUpdates(baseDoc, start, end, tables, changes);
+
+      // Now add deletions from all relevant revisions.
+      if (existingDoc) {
+        const snaps = await baseDoc
+          .collection(DELETE_COLLECTION)
+          .where("rev", ">=", startRevision)
+          .where("rev", "<", endRevision)
+          .get();
+        const records = snaps.docs.map(doc => doc.data() as DeleteRecord);
+
+        for (const record of records) {
+          Object.keys(record.deletes).forEach(table => {
+            changes[table].deleted.push(...record.deletes[table]);
+          });
+        }
+      }
     }
     start = end;
   }
@@ -138,7 +178,7 @@ async function pullChanges(
 
 // Modifies the contents of the "changes" object to include all changes from
 // a root doc (whether that's baseDoc or a batchDoc).
-async function mergeChanges(
+async function mergeCreatesAndUpdates(
   root: FirebaseFirestoreTypes.DocumentReference,
   startRevision: number,
   endRevision: number, // exclusive!
@@ -178,24 +218,6 @@ async function mergeChanges(
       });
     }),
   );
-
-  // Now add deletions from all revisions.
-  const rootSnap = await root.get();
-  const rootDoc = rootSnap.data() as MelonFireRoot | undefined;
-  if (rootDoc) {
-    // rootDoc might not exist, e.g. on first backup's pull
-    for (let rev = startRevision; rev < endRevision; rev++) {
-      const revStr = rev.toString();
-
-      if (rootDoc.melonDeletes?.hasOwnProperty(revStr)) {
-        const deletes = rootDoc.melonDeletes[revStr];
-
-        Object.keys(deletes).forEach(table => {
-          changes[table].deleted.push(...deletes[table]);
-        });
-      }
-    }
-  }
 }
 
 function removeMelonFields(record: ChangeRecord): ChangeWithId {
@@ -286,23 +308,17 @@ async function pushAllChanges(
       }
     });
 
-    const dels: Pick<MelonFireBaseDoc, "melonDeletes"> | {} = Object.keys(
-      tableDeletes,
-    ).length
-      ? {
-          melonDeletes: {
-            ...existingDoc?.melonDeletes,
-            [revision]: tableDeletes,
-          },
-        }
-      : {};
-    const updatedBase: Omit<
-      MelonFireBaseDoc,
-      "melonBatchTokens" | "melonDeletes"
-    > = {
+    if (Object.keys(tableDeletes).length) {
+      const record: DeleteRecord = {
+        revision,
+        deletes: tableDeletes,
+      };
+      trans.set(baseDoc.collection(DELETE_COLLECTION).doc(), record);
+    }
+
+    const updatedBase: Omit<MelonFireBaseDoc, "melonBatchTokens"> = {
       melonLatestRevision: revision,
       melonLatestDate: new Date().toISOString(),
-      ...dels,
     };
 
     // This is why you need less than MAX_TRANSACTION_WRITES of changes: you
@@ -379,10 +395,10 @@ async function pushBatchedChanges(
         melonLatestDate: date,
         melonLatestRevision: revision,
       };
-      const root: MelonFireRoot = {
+      const root: MelonBatchDoc = {
         melonLatestRevision: revision,
         melonLatestDate: date,
-        melonDeletes: { [revision]: deletes },
+        deletes,
       };
 
       if (revision !== lastPulledAt) {
@@ -395,8 +411,7 @@ async function pushBatchedChanges(
 
       trans.set(batchDoc, root);
 
-      // We merge when writing baseDoc so that we don't overwrite other things,
-      // like its "deletes" records.
+      // We merge when writing baseDoc so that we don't overwrite other things.
       trans.set(baseDoc, baseUpdate, { merge: true });
     });
   } catch (err) {
@@ -409,13 +424,19 @@ async function pushBatchedChanges(
 }
 
 function countChanges(changes: SyncDatabaseChangeSet): number {
-  // We don't count deletes because those are written separately in the baseDoc
-  // or batchDoc.
+  let hasDeletions = false;
   const tableCounts = Object.keys(changes).map(table => {
+    if (changes[table].deleted.length) {
+      hasDeletions = true;
+    }
     return changes[table].created.length + changes[table].updated.length;
   });
 
-  return tableCounts.reduce((prev, cur) => prev + cur, 0);
+  // If we have any deletions at all, we need to account for the extra
+  // DeleteRecord doc that we'll write. So we +1 when we have any deletions.
+  return (
+    tableCounts.reduce((prev, cur) => prev + cur, 0) + (hasDeletions ? 1 : 0)
+  );
 }
 
 // Collects writes until the batch count is hit, at which point it commits

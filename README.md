@@ -44,8 +44,9 @@ async function onSyncButtonPushOrRandomTimer(
   your collection doesn't have to be `"users"` — it can be anything you want.
 - You pass a `DocumentReference` to MelonFire, which will then write several of
   its own fields into the document (currently: `melonLatestRevision`,
-  `melonLatestDate`, `melonDeletes`, and `melonBatchTokens`). It'll also create
-  a collection under `syncDocRef` for each table in your database. If you don't
+  `melonLatestDate`, and `melonBatchTokens`). It'll also create
+  a collection under `syncDocRef` for each table in your database, as well as a
+  collection called `melonDeletes` where it stores deletions. If you don't
   mind these fields and collections living in a shared doc with other things
   (e.g. if you want MelonFire's data to be kept in your user's profile doc),
   it's fine; MelonFire won't overwrite your other fields/collections.
