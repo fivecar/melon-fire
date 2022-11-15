@@ -11,9 +11,9 @@ import firestore, {
 } from "@react-native-firebase/firestore";
 
 interface MelonFireRoot {
-  melonLatestRevision: number;
-  melonLatestDate: string; // ISO
-  melonDeletes: TableDeletesByRevision;
+  melonLatestRevision?: number;
+  melonLatestDate?: string; // ISO
+  melonDeletes?: TableDeletesByRevision;
 }
 
 interface MelonFireBaseDoc extends MelonFireRoot {
@@ -187,7 +187,7 @@ async function mergeChanges(
     for (let rev = startRevision; rev < endRevision; rev++) {
       const revStr = rev.toString();
 
-      if (rootDoc.melonDeletes.hasOwnProperty(revStr)) {
+      if (rootDoc.melonDeletes?.hasOwnProperty(revStr)) {
         const deletes = rootDoc.melonDeletes[revStr];
 
         Object.keys(deletes).forEach(table => {
