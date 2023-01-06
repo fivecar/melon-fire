@@ -2,14 +2,26 @@
   "name": "melon-fire",
   "version": "1.0.2",
   "description": "WatermelonDB Firestore sync",
-  "main": "index.ts",
+  "main": "dist/index.js",
+  "module": "dist/index.modern.js",
+  "source": "index.ts",
+  "types": "dist/index.d.ts",
   "dependencies": {
     "@react-native-firebase/firestore": "^15.7.0",
-    "@nozbe/watermelondb": "^0.24.0"
+    "@release-it/conventional-changelog": "^5.1.1",
+    "@nozbe/watermelondb": "^0.24.0",
+    "microbundle-crl": "^0.13.11",
+    "release-it": "^15.5.1"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "microbundle-crl --no-compress --format modern,cjs",
+    "prepare": "npm run build",
+    "release": "release-it"
   },
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fivecar/melon-fire.git"
