@@ -80,6 +80,10 @@ async function sync(
     database,
     pullChanges: async params => await pullChanges(database, baseDoc, params),
     pushChanges: async params => await pushChanges(baseDoc, params),
+    // The docs worringly say that "some edge cases may not be handled as well."
+    // I don't even know what that really means, but we need this flag to be
+    // true because we only keep the most recent record/version of each record.
+    sendCreatedAsUpdated: true,
   });
 }
 
@@ -155,8 +159,8 @@ async function pullChanges(
       if (existingDoc) {
         const snaps = await baseDoc
           .collection(DELETE_COLLECTION)
-          .where("rev", ">=", startRevision)
-          .where("rev", "<", endRevision)
+          .where("revision", ">=", startRevision)
+          .where("revision", "<", endRevision)
           .get();
         const records = snaps.docs.map(doc => doc.data() as DeleteRecord);
 

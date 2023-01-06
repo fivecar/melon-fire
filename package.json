@@ -26,5 +26,9 @@
   "bugs": {
     "url": "https://github.com/fivecar/melon-fire/issues"
   },
-  "homepage": "https://github.com/fivecar/melon-fire#readme"
+  "homepage": "https://github.com/fivecar/melon-fire#readme",
+  "prettier": {
+    "trailingComma": "all",
+    "arrowParens": "avoid"
+  }
 }
