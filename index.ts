@@ -263,7 +263,6 @@ async function pushAllChanges(
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
 
-  console.log("Going to start transaction");
   return await firestore().runTransaction(async trans => {
     const baseSnap = await trans.get(baseDoc);
     const existingDoc = baseSnap.data() as MelonFireBaseDoc | undefined;
@@ -271,8 +270,6 @@ async function pushAllChanges(
       ? existingDoc?.melonLatestRevision + 1
       : MIN_REVISION;
     const tableDeletes: TableDeletes = {};
-
-    console.log("checking revision and last pulled", revision, lastPulledAt);
 
     if (revision !== lastPulledAt) {
       throw Error(
@@ -282,9 +279,7 @@ async function pushAllChanges(
       );
     }
 
-    console.log("Going to go through each table");
-
-    Object.keys(params.changes).forEach(table => {
+    Object.keys(changes).forEach(table => {
       changes[table].created.forEach(raw => {
         const rec: ChangeRecord = {
           ...(raw as ChangeWithId),
@@ -294,9 +289,7 @@ async function pushAllChanges(
         delete rec._status;
         delete rec._changed;
 
-        console.log("About to set record", rec);
         trans.set(baseDoc.collection(table).doc(rec.id), rec);
-        console.log("Record set!");
       });
 
       changes[table].updated.forEach(raw => {
@@ -319,7 +312,6 @@ async function pushAllChanges(
       }
     });
 
-    console.log("About to process deletes");
     if (Object.keys(tableDeletes).length) {
       const record: DeleteRecord = {
         revision,
@@ -333,7 +325,6 @@ async function pushAllChanges(
       melonLatestDate: new Date().toISOString(),
     };
 
-    console.log("Setting updated base doc", updatedBase);
     // This is why you need less than MAX_TRANSACTION_WRITES of changes: you
     // need this one more write in order to update the baseDoc. Merging to not
     // overwrite any batch tokens.

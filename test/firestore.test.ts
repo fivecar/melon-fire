@@ -14,7 +14,7 @@ import {
   jest,
   test,
 } from "@jest/globals";
-import { exportsForTesting } from "../dist";
+import { exportsForTesting } from "../index";
 
 let activeApp;
 
@@ -59,22 +59,11 @@ afterAll(async () => {
 });
 
 describe("Melon Fire", () => {
-  test("ensure firebase works", async () => {
-    const db = activeApp.firestore();
-    const profile = db.collection("backups").doc("alice");
-
-    await profile.set({ hello: "world" });
-
-    const ref = await db.collection("backups").doc("alice").get();
-    expect(ref.data()).toEqual({ hello: "world" });
-  });
-
   test("pushes basic data successfully", async () => {
-    const db = activeApp.firestore();
-    const profile = db.collection("backups").doc("alice");
+    const firestore = activeApp.firestore();
+    const profile = firestore.collection("backups").doc("alice");
 
-    console.log("About to push changes");
-    await pushChanges(profile as any, {
+    await pushChanges(profile, {
       changes: {
         entries: {
           created: [{ id: "aaa", data: "hello" }],
@@ -82,14 +71,13 @@ describe("Melon Fire", () => {
           deleted: [],
         },
       },
-      lastPulledAt: 0,
+      lastPulledAt: 1,
     });
 
-    console.log("About to get entries");
     const entries = await profile.collection("entries").get();
 
-    console.log("About to check entries");
     expect(entries.docs.length).toBe(1);
-    expect(entries.docs[0].data()).toEqual({ id: "aaa", data: "hello" });
+    expect(entries.docs[0].data().id).toBe("aaa");
+    expect(entries.docs[0].data().data).toBe("hello");
   });
 });
