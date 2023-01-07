@@ -78,7 +78,8 @@ async function sync(
 ) {
   return await synchronize({
     database,
-    pullChanges: async params => await pullChanges(database, baseDoc, params),
+    pullChanges: async params =>
+      await pullChanges(Object.keys(database.schema.tables), baseDoc, params),
     pushChanges: async params => await pushChanges(baseDoc, params),
     // The docs worringly say that "some edge cases may not be handled as well."
     // I don't even know what that really means, but we need this flag to be
@@ -98,7 +99,7 @@ This means, whenever pulling a set of revisions, we need to apply each revision
 in order, pulling them from baseDoc or melonBatches as appropriate.
 */
 async function pullChanges(
-  db: Database,
+  tables: string[],
   baseDoc: FirebaseFirestoreTypes.DocumentReference,
   params: SyncPullArgs,
 ): Promise<SyncPullResult> {
@@ -110,7 +111,6 @@ async function pullChanges(
   const endRevision = existingDoc?.melonLatestRevision
     ? existingDoc?.melonLatestRevision + 1
     : startRevision;
-  const tables = Object.keys(db.schema.tables);
   const changes: SyncDatabaseChangeSet = {};
 
   tables.forEach(table => {
@@ -263,6 +263,7 @@ async function pushAllChanges(
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
 
+  console.log("Going to start transaction");
   return await firestore().runTransaction(async trans => {
     const baseSnap = await trans.get(baseDoc);
     const existingDoc = baseSnap.data() as MelonFireBaseDoc | undefined;
@@ -271,6 +272,8 @@ async function pushAllChanges(
       : MIN_REVISION;
     const tableDeletes: TableDeletes = {};
 
+    console.log("checking revision and last pulled", revision, lastPulledAt);
+
     if (revision !== lastPulledAt) {
       throw Error(
         `Local DB out of sync. Last pulled changes up to ${
@@ -278,6 +281,8 @@ async function pushAllChanges(
         }, but now attempting to push revision ${revision}`,
       );
     }
+
+    console.log("Going to go through each table");
 
     Object.keys(params.changes).forEach(table => {
       changes[table].created.forEach(raw => {
@@ -289,7 +294,9 @@ async function pushAllChanges(
         delete rec._status;
         delete rec._changed;
 
+        console.log("About to set record", rec);
         trans.set(baseDoc.collection(table).doc(rec.id), rec);
+        console.log("Record set!");
       });
 
       changes[table].updated.forEach(raw => {
@@ -312,6 +319,7 @@ async function pushAllChanges(
       }
     });
 
+    console.log("About to process deletes");
     if (Object.keys(tableDeletes).length) {
       const record: DeleteRecord = {
         revision,
@@ -325,6 +333,7 @@ async function pushAllChanges(
       melonLatestDate: new Date().toISOString(),
     };
 
+    console.log("Setting updated base doc", updatedBase);
     // This is why you need less than MAX_TRANSACTION_WRITES of changes: you
     // need this one more write in order to update the baseDoc. Merging to not
     // overwrite any batch tokens.
@@ -453,11 +462,11 @@ function countChanges(changes: SyncDatabaseChangeSet): number {
 // when you're done. You must flush, because there might be an unwritten partial
 // batch. rollback() will delete everything that was ever written.
 class BatchWriter {
-  private batch;
-  private count;
-  private doc;
+  private batch: FirebaseFirestoreTypes.WriteBatch;
+  private count: number;
+  private doc: FirebaseFirestoreTypes.DocumentReference;
   private touched: FirebaseFirestoreTypes.DocumentReference[];
-  private revision;
+  private revision: number;
 
   constructor(doc: FirebaseFirestoreTypes.DocumentReference, revision: number) {
     this.doc = doc;
@@ -547,3 +556,8 @@ class BatchWriter {
     this.touched = [];
   }
 }
+
+export const exportsForTesting = {
+  pullChanges,
+  pushChanges,
+};
