@@ -21,10 +21,10 @@ yarn install melon-fire
 
 ## Usage
 
-```
+```Typescript
 import firestore from "@react-native-firebase/firestore";
 import { Database } from  "@nozbe/watermelondb";
-import syncMelonFire from "melon-fire";
+import { syncMelonFire } from "melon-fire";
 
 async function onSyncButtonPushOrRandomTimer(
   db: Database,
@@ -36,6 +36,9 @@ async function onSyncButtonPushOrRandomTimer(
   return await syncMelonFire(db, syncDocRef);
 }
 ```
+
+### Note for Upgraders to v2.0+
+We now use a named export for `syncMelonFire`, which was needed because `microbundle` doesn't support having both a default export and a named export. So you'll now need to `import { syncMelonFire } from "melon-fire"` instead.
 
 ### Notes on Usage
 

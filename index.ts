@@ -79,7 +79,7 @@ const BATCH_COLLECTION = "melonBatches";
 const DELETE_COLLECTION = "melonDeletes"; // Contains DeleteRecord docs
 const MIN_REVISION = 1;
 
-export default async function syncMelonFire(
+export async function syncMelonFire(
   database: Database,
   baseDoc: FirebaseFirestoreTypes.DocumentReference,
 ) {
