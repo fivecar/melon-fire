@@ -33,7 +33,7 @@ interface MelonBatchDoc extends MelonFireRoot {
 
 interface ChangeRecord {
   id: string;
-  melonFireChange: ChangeType;
+  melonFireChange?: never; // Shipped in v1, so must delete from loaded rows
   melonFireRevision: number;
   _status?: string; // Need to delete this from the raw record
   _changed?: string; // same - need to del.
@@ -50,8 +50,18 @@ interface TableDeletes {
   [tableName: string]: string[]; // ids of records to delete
 }
 
-type ChangeType = "created" | "updated" | "deleted";
 type ChangeWithId = Partial<ChangeRecord> & Pick<ChangeRecord, "id">;
+
+// We use this when loading changes so that sequential records on the same id
+// (e.g. an early create followed by a late update) are merged into one record.
+// Note we only ever have updates (and no creates) because we use
+// sendCreatedAsUpdated: true in the sync config.
+interface ChangeLoadMap {
+  [tableName: string]: {
+    updated: { [id: string]: DirtyRaw };
+    deleted: { [id: string]: true };
+  };
+}
 
 const MAX_TRANSACTION_WRITES = 500; // From firebase docs
 const BATCH_COLLECTION = "melonBatches";
@@ -97,6 +107,14 @@ collection.
 
 This means, whenever pulling a set of revisions, we need to apply each revision
 in order, pulling them from baseDoc or melonBatches as appropriate.
+
+A note on "timestamps": we don't use them, so that we avoid tricky sync issues
+where timestamps might be different on different machines (though I'm told large
+scale cloud systems like Firestore might guarantee that timestamps are the same
+across all machines). Instead, we use a revision number that's incremented each
+time you write. So when you pull, the returned timestamp will be one revision
+beyond the last written revision (i.e. it's exclusive); when you push, you'll
+push at the same timestamp as when you last pulled.
 */
 async function pullChanges(
   tables: string[],
@@ -111,20 +129,19 @@ async function pullChanges(
   const endRevision = existingDoc?.melonLatestRevision
     ? existingDoc?.melonLatestRevision + 1
     : startRevision;
-  const changes: SyncDatabaseChangeSet = {};
+  const changeMap: ChangeLoadMap = {};
 
   tables.forEach(table => {
-    changes[table] = {
-      created: [],
-      updated: [],
-      deleted: [],
+    changeMap[table] = {
+      updated: {},
+      deleted: {},
     };
   });
 
   let start = startRevision;
   let end = start;
 
-  // It's must faster to pull forward changes over multiple revisions when
+  // It's much faster to pull forward changes over multiple revisions when
   // they're contiguous in baseDoc -- so we go through revisions here in baseDoc
   // clumps until they're interrupted by a melonBatch. Note that you can't just
   // pull _all_ baseDoc revs first and then sprinkle in the melonBatches,
@@ -141,19 +158,21 @@ async function pullChanges(
       const token = existingDoc!.melonBatchTokens[end.toString()];
       const root = baseDoc.collection(BATCH_COLLECTION).doc(token);
 
+      end++; // End is exclusive, so you need to bump it before merging below
       const [rootSnap] = await Promise.all([
         root.get(),
-        mergeCreatesAndUpdates(root, start, end, tables, changes),
+        mergeCreatesAndUpdates(root, start, end, tables, changeMap),
       ]);
-      end++;
 
       // Now add deletions from this batch
       const rootDoc = rootSnap.data() as MelonBatchDoc;
       Object.keys(rootDoc.deletes).forEach(table => {
-        changes[table].deleted.push(...rootDoc.deletes[table]);
+        rootDoc.deletes[table].forEach(
+          id => (changeMap[table].deleted[id] = true),
+        );
       });
     } else {
-      await mergeCreatesAndUpdates(baseDoc, start, end, tables, changes);
+      await mergeCreatesAndUpdates(baseDoc, start, end, tables, changeMap);
 
       // Now add deletions from all relevant revisions.
       if (existingDoc) {
@@ -166,7 +185,9 @@ async function pullChanges(
 
         for (const record of records) {
           Object.keys(record.deletes).forEach(table => {
-            changes[table].deleted.push(...record.deletes[table]);
+            record.deletes[table].forEach(
+              id => (changeMap[table].deleted[id] = true),
+            );
           });
         }
       }
@@ -174,20 +195,32 @@ async function pullChanges(
     start = end;
   }
 
+  const changes: SyncDatabaseChangeSet = {};
+
+  tables.forEach(table => {
+    changes[table] = {
+      created: [],
+      updated: Object.values(changeMap[table].updated).filter(
+        row => !(row.id in changeMap[table].deleted),
+      ),
+      deleted: Object.keys(changeMap[table].deleted),
+    };
+  });
+
   return {
     changes,
     timestamp: endRevision,
   };
 }
 
-// Modifies the contents of the "changes" object to include all changes from
-// a root doc (whether that's baseDoc or a batchDoc).
+// Adds to changeMap allchanges from a root doc (whether that's baseDoc or a
+// batchDoc).
 async function mergeCreatesAndUpdates(
   root: FirebaseFirestoreTypes.DocumentReference,
   startRevision: number,
   endRevision: number, // exclusive!
   tables: string[],
-  changes: SyncDatabaseChangeSet,
+  changeMap: ChangeLoadMap,
 ) {
   await Promise.all(
     tables.map(async table => {
@@ -197,28 +230,11 @@ async function mergeCreatesAndUpdates(
         .where("melonFireRevision", "<", endRevision)
         .orderBy("melonFireRevision")
         .get();
-      const recs = refs.docs.map(doc => doc.data() as ChangeRecord);
 
-      changes[table].created.push(
-        ...recs
-          .filter(rec => rec.melonFireChange === "created")
-          .map(removeMelonFields),
-      );
+      refs.docs.forEach(doc => {
+        const rec = removeMelonFields(doc.data() as ChangeRecord);
 
-      // New updates need to overwrite old updates that might already exist
-      const updates = recs
-        .filter(rec => rec.melonFireChange === "updated")
-        .map(removeMelonFields);
-      updates.forEach(update => {
-        const index = changes[table].updated.findIndex(
-          up => up.id === update.id,
-        );
-
-        if (index >= 0) {
-          changes[table].updated[index] = update;
-        } else {
-          changes[table].updated.push(update);
-        }
+        changeMap[table].updated[rec.id] = rec;
       });
     }),
   );
@@ -283,7 +299,6 @@ async function pushAllChanges(
       changes[table].created.forEach(raw => {
         const rec: ChangeRecord = {
           ...(raw as ChangeWithId),
-          melonFireChange: "created",
           melonFireRevision: revision,
         };
         delete rec._status;
@@ -295,7 +310,6 @@ async function pushAllChanges(
       changes[table].updated.forEach(raw => {
         const rec: ChangeRecord = {
           ...(raw as ChangeWithId),
-          melonFireChange: "updated",
           melonFireRevision: revision,
         };
         delete rec._status;
@@ -362,8 +376,22 @@ async function pushBatchedChanges(
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
   const batchDoc = baseDoc.collection(BATCH_COLLECTION).doc();
-  let batch = new BatchWriter(batchDoc, lastPulledAt);
+  const baseSnap = await baseDoc.get();
+  const existingDoc = baseSnap.data() as MelonFireBaseDoc | undefined;
+  const revision = existingDoc?.melonLatestRevision
+    ? existingDoc?.melonLatestRevision + 1
+    : MIN_REVISION;
+
+  let batch = new BatchWriter(batchDoc, revision);
   const deletes: TableDeletes = {};
+
+  if (revision !== lastPulledAt) {
+    throw Error(
+      `Local DB out of sync. Last pulled changes up to ${
+        lastPulledAt - 1
+      }, but now attempting to push revision ${revision}`,
+    );
+  }
 
   // This is deliberately written to serially await through these iterables
   // so that BatchWriter can actually work reliably.
@@ -385,11 +413,6 @@ async function pushBatchedChanges(
   // we attempt an atomic write that will integrate us into the main backup.
   try {
     await firestore().runTransaction(async trans => {
-      const baseSnap = await trans.get(baseDoc);
-      const existingDoc = baseSnap.data() as MelonFireBaseDoc | undefined;
-      const revision = existingDoc?.melonLatestRevision
-        ? existingDoc?.melonLatestRevision + 1
-        : MIN_REVISION;
       const date = new Date().toISOString();
       const baseUpdate: Omit<MelonFireBaseDoc, "melonDeletes"> = {
         melonBatchTokens: {
@@ -486,20 +509,19 @@ class BatchWriter {
   }
 
   public async created(table: string, raw: DirtyRaw) {
-    await this.write("created", table, raw);
+    await this.write(table, raw);
     return this;
   }
 
   public async updated(table: string, raw: DirtyRaw) {
-    await this.write("updated", table, raw);
+    await this.write(table, raw);
     return this;
   }
 
-  private async write(change: ChangeType, table: string, raw: DirtyRaw) {
+  private async write(table: string, raw: DirtyRaw) {
     const ref = this.doc.collection(table).doc(raw.id);
     const data: ChangeRecord = {
       ...(raw as ChangeWithId),
-      melonFireChange: change,
       melonFireRevision: this.revision,
     };
 
@@ -551,4 +573,6 @@ class BatchWriter {
 export const exportsForTesting = {
   pullChanges,
   pushChanges,
+  pushBatchedChanges,
+  countChanges,
 };
