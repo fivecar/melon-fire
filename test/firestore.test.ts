@@ -28,8 +28,7 @@ jest.mock("@react-native-firebase/firestore", () => {
 });
 jest.setTimeout(15000);
 
-const { pullChanges, pushChanges, pushBatchedChanges, countChanges } =
-  exportsForTesting;
+const { pullChanges, pushChanges, countChanges } = exportsForTesting;
 
 /**
  * The emulator will accept any project ID for testing.
@@ -225,27 +224,36 @@ describe("Melon Fire", () => {
       created.push({ id: i.toString(), data: "hello" });
     }
 
-    const createChanges = await countChanges({
-      entries: { created, updated, deleted },
-    });
+    const createChanges = await countChanges(
+      {
+        entries: { created, updated, deleted },
+      },
+      0,
+    );
     expect(createChanges).toBe(rowsPerType);
 
     for (let i = 0; i < rowsPerType; i++) {
       updated.push({ id: i.toString(), data: "hello" });
     }
-    const updateChanges = await countChanges({
-      entries: { created, updated, deleted },
-    });
+    const updateChanges = await countChanges(
+      {
+        entries: { created, updated, deleted },
+      },
+      0,
+    );
     expect(updateChanges).toBe(rowsPerType * 2); // includes creates!
 
     for (let i = 0; i < rowsPerType; i++) {
       deleted.push(i.toString());
     }
-    const deleteChanges = await countChanges({
-      entries: { created, updated, deleted },
-    });
+    const deleteChanges = await countChanges(
+      {
+        entries: { created, updated, deleted },
+      },
+      deleted.length,
+    );
     // Deletion changes have one additional write, which is the DeleteRecord doc
-    expect(deleteChanges).toBe(rowsPerType * 2 + 1);
+    expect(deleteChanges).toBe(rowsPerType * 3 + 1);
   });
 
   test("pushes batches correctly", async () => {
@@ -284,5 +292,116 @@ describe("Melon Fire", () => {
     expect(res.changes.entries.created.length).toBe(0);
     expect(res.changes.entries.updated.length).toBe(totalCreated);
     expect(res.changes.entries.deleted.length).toBe(0);
+  });
+
+  test("deletes rows from baseDoc", async () => {
+    const firestore = activeApp.firestore();
+    const profile = firestore.collection("backups").doc("hotel");
+
+    await pushChanges(profile, {
+      changes: {
+        entries: {
+          created: [
+            { id: "aaa", data: "hello" },
+            { id: "bbb", data: "hi" },
+            { id: "ccc", data: "there" },
+          ],
+          updated: [],
+          deleted: [],
+        },
+      },
+      lastPulledAt: 1,
+    });
+    await pushChanges(profile, {
+      changes: {
+        entries: {
+          created: [],
+          updated: [],
+          deleted: ["bbb"],
+        },
+      },
+      lastPulledAt: 2,
+    });
+
+    const res = await pullChanges(["entries"], profile, { lastPulledAt: null });
+
+    expect(res.changes.entries.created.length).toBe(0);
+    expect(res.changes.entries.updated.length).toBe(2);
+    expect(res.changes.entries.deleted.length).toBe(1);
+    expect(res.changes.entries.deleted[0]).toBe("bbb");
+
+    const delSnap = await profile.collection("entries").doc("bbb").get();
+    expect(delSnap.exists).toBe(false);
+  });
+
+  test("deletes rows from batches", async () => {
+    const firestore = activeApp.firestore();
+    const profile = firestore.collection("backups").doc("india");
+    const created = [];
+    const totalCreated = 1001;
+
+    for (let i = 0; i < totalCreated; i++) {
+      created.push({ id: i.toString(), data: "hello" });
+    }
+
+    await pushChanges(profile, {
+      changes: {
+        entries: {
+          created,
+          updated: [],
+          deleted: [],
+        },
+      },
+      lastPulledAt: 1,
+    });
+
+    const mid = await pullChanges(["entries"], profile, { lastPulledAt: null });
+    const batches = await profile.collection("melonBatches").get();
+
+    expect(batches.docs.length).toBe(1);
+    expect(mid.changes.entries.updated.length).toBe(totalCreated);
+
+    await pushChanges(profile, {
+      changes: {
+        entries: {
+          created: [],
+          updated: [],
+          deleted: ["218"],
+        },
+      },
+      lastPulledAt: mid.timestamp,
+    });
+
+    const dels = await profile.collection("melonDeletes").get();
+
+    expect(dels.docs.length).toBe(1);
+
+    const res = await pullChanges(["entries"], profile, {
+      lastPulledAt: mid.timestamp,
+    });
+
+    // First verify the pull returns the right results
+    expect(res.changes.entries.created.length).toBe(0);
+    expect(res.changes.entries.deleted.length).toBe(1);
+    expect(res.changes.entries.updated.length).toBe(0);
+
+    // Now check that firestore doesn't have 218 anymore
+    const delSnap = await batches.docs[0].ref
+      .collection("entries")
+      .doc("218")
+      .get();
+    expect(delSnap.exists).toBe(false);
+
+    // Finally verify that a pull from the beginning of time won't even show
+    // 218 ever existed.
+    const fullPull = await pullChanges(["entries"], profile, {
+      lastPulledAt: null,
+    });
+    const entries = fullPull.changes.entries;
+
+    expect(entries.created.length).toBe(0);
+    expect(entries.deleted.length).toBe(1);
+    expect(entries.updated.length).toBe(totalCreated - 1);
+    expect(entries.updated.map(u => u.id)).not.toContain("218");
   });
 });
