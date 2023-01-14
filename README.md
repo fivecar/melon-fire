@@ -16,7 +16,7 @@ npm install melon-fire
 or
 
 ```
-yarn install melon-fire
+yarn add melon-fire
 ```
 
 ## Usage
@@ -31,7 +31,7 @@ async function onSyncButtonPushOrRandomTimer(
   userId: string,
 ) {
   const syncDocRef = firestore()
-    .collections("users")
+    .collection("users")
     .doc(userId);
   return await syncMelonFire(db, syncDocRef);
 }
