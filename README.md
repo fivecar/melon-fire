@@ -16,7 +16,7 @@ npm install melon-fire
 or
 
 ```
-yarn install melon-fire
+yarn add melon-fire
 ```
 
 ## Usage
