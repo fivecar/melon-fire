@@ -404,4 +404,34 @@ describe("Melon Fire", () => {
     expect(entries.updated.length).toBe(totalCreated - 1);
     expect(entries.updated.map(u => u.id)).not.toContain("218");
   });
+
+  test("handles invalid firestore IDs correctly", async () => {
+    const firestore = activeApp.firestore();
+    const profile = firestore.collection("backups").doc("juliet");
+    const unencodedID =
+      "https://rss.art19.com/smartless-gid://art19-episode-locator";
+
+    await pushChanges(profile, {
+      changes: {
+        entries: {
+          created: [
+            {
+              id: unencodedID,
+              data: "hello",
+            },
+          ],
+          updated: [],
+          deleted: [],
+        },
+      },
+      lastPulledAt: 1,
+    });
+    const res = await pullChanges(["entries"], profile, { lastPulledAt: 1 });
+
+    expect(res.changes.entries.created.length).toBe(0);
+    expect(res.changes.entries.updated.length).toBe(1);
+    expect(res.changes.entries.updated[0].id).toBe(unencodedID);
+    expect(res.changes.entries.deleted.length).toBe(0);
+    expect(res.timestamp).toBe(2);
+  });
 });

@@ -1,10 +1,10 @@
 import { Database, DirtyRaw } from "@nozbe/watermelondb";
 import {
   SyncDatabaseChangeSet,
-  synchronize,
   SyncPullArgs,
   SyncPullResult,
   SyncPushArgs,
+  synchronize,
 } from "@nozbe/watermelondb/sync";
 import firestore, {
   FirebaseFirestoreTypes,
@@ -136,6 +136,7 @@ async function pullChanges(
   const startRevision = lastPulledAt === null ? MIN_REVISION : lastPulledAt;
   const baseSnap = await baseDoc.get();
   const [endRevision, batchTokens] = revisionFromBaseSnap(baseSnap);
+  // All ids added to changeMap are url-decoded
   const changeMap: ChangeLoadMap = {};
 
   tables.forEach(table => {
@@ -172,7 +173,7 @@ async function pullChanges(
       const rootDoc = rootSnap.data() as MelonBatchDoc;
       Object.keys(rootDoc.deletes).forEach(table => {
         rootDoc.deletes[table].forEach(
-          id => (changeMap[table].deleted[id] = true),
+          id => (changeMap[table].deleted[decodeURIComponent(id)] = true),
         );
       });
     } else {
@@ -189,7 +190,7 @@ async function pullChanges(
       for (const record of records) {
         Object.keys(record.deletes).forEach(table => {
           record.deletes[table].forEach(
-            id => (changeMap[table].deleted[id] = true),
+            id => (changeMap[table].deleted[decodeURIComponent(id)] = true),
           );
         });
       }
@@ -216,7 +217,7 @@ async function pullChanges(
 }
 
 // Adds to changeMap allchanges from a root doc (whether that's baseDoc or a
-// batchDoc).
+// batchDoc). All returned ids are already url-decoded.
 async function mergeCreatesAndUpdates(
   root: FirebaseFirestoreTypes.DocumentReference,
   startRevision: number,
@@ -236,7 +237,7 @@ async function mergeCreatesAndUpdates(
       refs.docs.forEach(doc => {
         const rec = removeMelonFields(doc.data() as ChangeRecord);
 
-        changeMap[table].updated[rec.id] = rec;
+        changeMap[table].updated[decodeURIComponent(rec.id)] = rec;
       });
     }),
   );
@@ -275,6 +276,9 @@ async function pushChanges(
   }
 }
 
+/**
+ * returns refs with url-encoded ids!
+ */
 async function findDeleteRefs(
   baseDoc: FirebaseFirestoreTypes.DocumentReference,
   params: SyncPushArgs,
@@ -284,14 +288,16 @@ async function findDeleteRefs(
   for (const table of Object.keys(params.changes)) {
     const deletedIds = params.changes[table].deleted;
     const baseSnaps = await Promise.all(
-      deletedIds.map(id => baseDoc.collection(table).doc(id).get()),
+      deletedIds.map(id =>
+        baseDoc.collection(table).doc(encodeURIComponent(id)).get(),
+      ),
     );
     const baseExists = baseSnaps.filter(snap => snap.exists);
 
     if (baseExists.length > 0) {
       delRefs[table] = baseExists.map(snap => ({
         ref: snap.ref,
-        id: snap.data().id,
+        id: encodeURIComponent(snap.data().id),
       }));
     }
 
@@ -308,7 +314,7 @@ async function findDeleteRefs(
     deletedIds.forEach(id =>
       delInBatchPromises.push(
         ...batchSnaps.docs.map(batch =>
-          batch.ref.collection(table).doc(id).get(),
+          batch.ref.collection(table).doc(encodeURIComponent(id)).get(),
         ),
       ),
     );
@@ -318,7 +324,7 @@ async function findDeleteRefs(
     if (delInBatchExists.length > 0) {
       const refs = delInBatchExists.map(snap => ({
         ref: snap.ref,
-        id: snap.data().id,
+        id: encodeURIComponent(snap.data().id),
       }));
       if (table in delRefs) {
         delRefs[table].push(...refs);
@@ -376,7 +382,10 @@ async function pushAllChanges(
         delete rec._status;
         delete rec._changed;
 
-        trans.set(baseDoc.collection(table).doc(rec.id), rec);
+        trans.set(
+          baseDoc.collection(table).doc(encodeURIComponent(rec.id)),
+          rec,
+        );
       });
 
       changes[table].updated.forEach(raw => {
@@ -390,10 +399,14 @@ async function pushAllChanges(
         // pushBatchedChanges. TL;DR is that you can't be guaranteed any
         // particular row/doc exists; they might be sequestered in a tokened
         // batch.
-        trans.set(baseDoc.collection(table).doc(rec.id), rec);
+        trans.set(
+          baseDoc.collection(table).doc(encodeURIComponent(rec.id)),
+          rec,
+        );
       });
 
       if (table in delRefs) {
+        // delRef ids are already url-encoded
         tableDeletes[table] = delRefs[table].map(ref => ref.id);
         delRefs[table].forEach(delRef => {
           trans.delete(delRef.ref);
@@ -478,6 +491,7 @@ async function pushBatchedChanges(
     }
 
     if (table in delRefs) {
+      // Note that delRef ids are already url-encoded
       deletes[table] = delRefs[table].map(ref => ref.id);
       await batch.deleted(delRefs[table].map(dr => dr.ref));
     }
@@ -659,7 +673,7 @@ class BatchWriter {
   }
 
   private async write(table: string, raw: DirtyRaw) {
-    const ref = this.doc.collection(table).doc(raw.id);
+    const ref = this.doc.collection(table).doc(encodeURIComponent(raw.id));
     const data: ChangeRecord = {
       ...(raw as ChangeWithId),
       melonFireRevision: this.revision,
