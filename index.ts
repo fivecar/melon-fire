@@ -33,13 +33,24 @@ interface MelonBatchDoc extends MelonFireRoot {
   deletes: TableDeletes;
 }
 
+// You need to delete these before uploading any records. And because we made
+// a mistake and let these through in batched writes in the past, we now also
+// need to clean these out of past records when pulling changes.
+interface WatermelonClientInternals {
+  _status?: string; // Need to delete this from the raw record
+  _changed?: string; // same - need to del.
+}
+
 interface ChangeRecord {
   id: string;
   melonFireChange?: never; // Shipped in v1, so must delete from loaded rows
   melonFireRevision: number;
-  _status?: string; // Need to delete this from the raw record
-  _changed?: string; // same - need to del.
+  _status: never; // Guarantees we don't let internals through
+  _changed: never;
 }
+
+type ChangeRecordWithWatermelonInternals = ChangeRecord &
+  WatermelonClientInternals;
 
 interface DeleteRef {
   ref: FirebaseFirestoreTypes.DocumentReference;
@@ -60,8 +71,6 @@ interface DeleteRecord {
 interface TableDeletes {
   [tableName: string]: string[]; // ids of records to delete
 }
-
-type ChangeWithId = Partial<ChangeRecord> & Pick<ChangeRecord, "id">;
 
 // We use this when loading changes so that sequential records on the same id
 // (e.g. an early create followed by a late update) are merged into one record.
@@ -235,7 +244,11 @@ async function mergeCreatesAndUpdates(
         .get();
 
       refs.docs.forEach(doc => {
-        const rec = removeMelonFields(doc.data() as ChangeRecord);
+        // We shouldn't have uploaded those internals... but now we have to
+        // accept that our type, coming out of the cloud, will always have the
+        // possibility of having internals.
+        const storedData = doc.data() as ChangeRecordWithWatermelonInternals;
+        const rec = removeMelonFields(removeWatermelonInternals(storedData));
 
         changeMap[table].updated[decodeURIComponent(rec.id)] = rec;
       });
@@ -243,9 +256,20 @@ async function mergeCreatesAndUpdates(
   );
 }
 
-function removeMelonFields(record: ChangeRecord): ChangeWithId {
-  delete (record as ChangeWithId).melonFireChange;
-  delete (record as ChangeWithId).melonFireRevision;
+function removeWatermelonInternals(
+  obj: ChangeRecordWithWatermelonInternals,
+): ChangeRecord {
+  delete obj._status;
+  delete obj._changed;
+  return obj;
+}
+
+// Prior to fixing a bug, we had pushed up batch records with Watermelon
+// internals. So we now need to strip them out here because some folks still
+// have those fields in their cloud records.
+function removeMelonFields(record: ChangeRecord): ChangeRecord {
+  delete record.melonFireChange;
+  delete record.melonFireRevision;
   return record;
 }
 
@@ -374,27 +398,13 @@ async function pushAllChanges(
     }
 
     Object.keys(changes).forEach(table => {
-      changes[table].created.forEach(raw => {
-        const rec: ChangeRecord = {
-          ...(raw as ChangeWithId),
+      function storeRawInTrans(raw: DirtyRaw) {
+        const rawRec: ChangeRecordWithWatermelonInternals = {
+          ...(raw as ChangeRecordWithWatermelonInternals),
           melonFireRevision: revision,
         };
-        delete rec._status;
-        delete rec._changed;
+        const rec = removeWatermelonInternals(rawRec);
 
-        trans.set(
-          baseDoc.collection(table).doc(encodeURIComponent(rec.id)),
-          rec,
-        );
-      });
-
-      changes[table].updated.forEach(raw => {
-        const rec: ChangeRecord = {
-          ...(raw as ChangeWithId),
-          melonFireRevision: revision,
-        };
-        delete rec._status;
-        delete rec._changed;
         // This is a set, not an update, for reasons outlined in
         // pushBatchedChanges. TL;DR is that you can't be guaranteed any
         // particular row/doc exists; they might be sequestered in a tokened
@@ -403,7 +413,10 @@ async function pushAllChanges(
           baseDoc.collection(table).doc(encodeURIComponent(rec.id)),
           rec,
         );
-      });
+      }
+
+      changes[table].created.forEach(storeRawInTrans);
+      changes[table].updated.forEach(storeRawInTrans);
 
       if (table in delRefs) {
         // delRef ids are already url-encoded
@@ -483,11 +496,17 @@ async function pushBatchedChanges(
   // so that BatchWriter can actually work reliably.
   for (const table of Object.keys(changes)) {
     for (const raw of Object.values(changes[table].created)) {
-      await batch.created(table, raw);
+      await batch.created(
+        table,
+        removeWatermelonInternals(raw as ChangeRecordWithWatermelonInternals),
+      );
     }
 
     for (const raw of Object.values(changes[table].updated)) {
-      await batch.updated(table, raw);
+      await batch.updated(
+        table,
+        removeWatermelonInternals(raw as ChangeRecordWithWatermelonInternals),
+      );
     }
 
     if (table in delRefs) {
@@ -621,13 +640,13 @@ class BatchWriter {
     return this;
   }
 
-  public async created(table: string, raw: DirtyRaw) {
-    await this.write(table, raw);
+  public async created(table: string, rec: ChangeRecord) {
+    await this.write(table, rec);
     return this;
   }
 
-  public async updated(table: string, raw: DirtyRaw) {
-    await this.write(table, raw);
+  public async updated(table: string, rec: ChangeRecord) {
+    await this.write(table, rec);
     return this;
   }
 
@@ -672,10 +691,15 @@ class BatchWriter {
     return this;
   }
 
-  private async write(table: string, raw: DirtyRaw) {
-    const ref = this.doc.collection(table).doc(encodeURIComponent(raw.id));
+  /**
+   * By the time you call this, you should be sure that
+   * removeWatermelonInternals has already been called so that the record
+   * doesn't contain those internals.
+   */
+  private async write(table: string, rec: ChangeRecord) {
+    const ref = this.doc.collection(table).doc(encodeURIComponent(rec.id));
     const data: ChangeRecord = {
-      ...(raw as ChangeWithId),
+      ...rec,
       melonFireRevision: this.revision,
     };
 
