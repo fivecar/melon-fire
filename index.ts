@@ -316,7 +316,7 @@ async function findDeleteRefs(
         baseDoc.collection(table).doc(encodeURIComponent(id)).get(),
       ),
     );
-    const baseExists = baseSnaps.filter(snap => snap.exists);
+    const baseExists = baseSnaps.filter(snap => snap.exists());
 
     if (baseExists.length > 0) {
       delRefs[table] = baseExists.map(snap => ({
@@ -343,7 +343,7 @@ async function findDeleteRefs(
       ),
     );
     const delInBatchSnaps = await Promise.all(delInBatchPromises);
-    const delInBatchExists = delInBatchSnaps.filter(snap => snap.exists);
+    const delInBatchExists = delInBatchSnaps.filter(snap => snap.exists());
 
     if (delInBatchExists.length > 0) {
       const refs = delInBatchExists.map(snap => ({

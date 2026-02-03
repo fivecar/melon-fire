@@ -12,18 +12,121 @@ import { exportsForTesting } from "../index";
 
 let activeApp: ReactNativeFirebase.FirebaseApp;
 
-jest.mock("@react-native-firebase/firestore", () => {
-  const originalModule = jest.requireActual(
-    "@react-native-firebase/firestore",
-  ) as object;
-  const mainApp = mockInitializeTestApp({ projectId: PROJECT_ID, auth: null });
+// Wrap a snapshot to convert .exists property to .exists() method
+// to match @react-native-firebase/firestore v18+ API
+function mockWrapSnapshot(snap: any): any {
+  const existsValue = snap.exists;
+  return new Proxy(snap, {
+    get(target, prop) {
+      if (prop === "exists") {
+        return () => existsValue;
+      }
+      if (prop === "ref") {
+        return mockWrapDocRef(target.ref);
+      }
+      return target[prop];
+    },
+  });
+}
 
-  activeApp = mainApp as unknown as ReactNativeFirebase.FirebaseApp;
+// Create a proxy-based wrapper for firestore to avoid mutation issues
+function mockWrapFirestore(fs: any): any {
+  return new Proxy(fs, {
+    get(target, prop) {
+      if (prop === "collection") {
+        return (path: string) => mockWrapCollection(target.collection(path));
+      }
+      if (prop === "batch") {
+        return () => target.batch();
+      }
+      if (prop === "runTransaction") {
+        return target.runTransaction.bind(target);
+      }
+      return target[prop];
+    },
+  });
+}
+
+function mockWrapCollection(col: any): any {
+  return new Proxy(col, {
+    get(target, prop) {
+      if (prop === "doc") {
+        return (path: string) => mockWrapDocRef(target.doc(path));
+      }
+      if (prop === "get") {
+        return async () => {
+          const snapshot = await target.get();
+          return {
+            ...snapshot,
+            docs: snapshot.docs.map(mockWrapSnapshot),
+          };
+        };
+      }
+      if (prop === "where") {
+        return (...args: any[]) => mockWrapQuery(target.where(...args));
+      }
+      return target[prop];
+    },
+  });
+}
+
+function mockWrapQuery(query: any): any {
+  return new Proxy(query, {
+    get(target, prop) {
+      if (prop === "get") {
+        return async () => {
+          const snapshot = await target.get();
+          return {
+            ...snapshot,
+            docs: snapshot.docs.map(mockWrapSnapshot),
+          };
+        };
+      }
+      if (prop === "where") {
+        return (...args: any[]) => mockWrapQuery(target.where(...args));
+      }
+      if (prop === "orderBy") {
+        return (...args: any[]) => mockWrapQuery(target.orderBy(...args));
+      }
+      return target[prop];
+    },
+  });
+}
+
+function mockWrapDocRef(doc: any): any {
+  return new Proxy(doc, {
+    get(target, prop) {
+      if (prop === "get") {
+        return async () => {
+          const snapshot = await target.get();
+          return mockWrapSnapshot(snapshot);
+        };
+      }
+      if (prop === "collection") {
+        return (path: string) => mockWrapCollection(target.collection(path));
+      }
+      return target[prop];
+    },
+  });
+}
+
+jest.mock("@react-native-firebase/firestore", () => {
+  const mainApp = mockInitializeTestApp({ projectId: PROJECT_ID, auth: null });
+  const wrappedFirestore = mockWrapFirestore(mainApp.firestore());
+
+  // Wrap activeApp so its .firestore() returns wrapped firestore
+  activeApp = new Proxy(mainApp, {
+    get(target, prop) {
+      if (prop === "firestore") {
+        return () => wrappedFirestore;
+      }
+      return (target as any)[prop];
+    },
+  }) as unknown as ReactNativeFirebase.FirebaseApp;
 
   return {
     __esModule: true,
-    ...originalModule,
-    default: () => mainApp.firestore(),
+    default: () => wrappedFirestore,
   };
 });
 jest.setTimeout(15000);
@@ -331,7 +434,7 @@ describe("Melon Fire", () => {
     expect(res.changes.entries.deleted[0]).toBe("bbb");
 
     const delSnap = await profile.collection("entries").doc("bbb").get();
-    expect(delSnap.exists).toBe(false);
+    expect(delSnap.exists()).toBe(false);
   });
 
   test("deletes rows from batches", async () => {
@@ -390,7 +493,7 @@ describe("Melon Fire", () => {
       .collection("entries")
       .doc("218")
       .get();
-    expect(delSnap.exists).toBe(false);
+    expect(delSnap.exists()).toBe(false);
 
     // Finally verify that a pull from the beginning of time won't even show
     // 218 ever existed.
