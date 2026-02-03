@@ -12,8 +12,10 @@
     "@firebase/rules-unit-testing": "^1.3.15",
     "@jest/globals": "^29.3.1",
     "@nozbe/watermelondb": "^0.24.0",
-    "@react-native-firebase/app": "^16.5.0",
-    "@react-native-firebase/firestore": "^15.7.0",
+    "@react-native-firebase/app": "^23.7.0",
+    "@react-native-firebase/firestore": "^23.7.0",
+    "react": "^18.3.1",
+    "react-native": "^0.76.6",
     "@release-it/conventional-changelog": "^5.1.1",
     "@types/mocha": "^10.0.1",
     "firebase-admin": "^9.12.0",
@@ -25,7 +27,7 @@
   },
   "peerDependencies": {
     "@nozbe/watermelondb": "^0.24.0",
-    "@react-native-firebase/firestore": "^15.7.0"
+    "@react-native-firebase/firestore": "^23.7.0"
   },
   "scripts": {
     "test": "firebase emulators:exec --only firestore \"jest --detectOpenHandles\"",
@@ -53,7 +55,7 @@
     ],
     "preset": "react-native",
     "transformIgnorePatterns": [
-      "node_modules/(?!(react-native|@react-native|@react-native-firebase)/)"
+      "node_modules/(?!(react-native|@react-native|@react-native-firebase|firebase|@firebase)/)"
     ]
   },
   "author": "Philip Su",
