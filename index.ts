@@ -14,7 +14,6 @@ import {
   DocumentSnapshot,
   getDoc,
   getDocs,
-  getFirestore,
   orderBy,
   query,
   runTransaction,
@@ -399,7 +398,7 @@ async function pushAllChanges(
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
 
-  return await runTransaction(getFirestore(), async trans => {
+  return await runTransaction(baseDoc.firestore, async trans => {
     const baseSnap = await trans.get(baseDoc);
     const [revision] = revisionFromBaseSnap(baseSnap);
     const tableDeletes: TableDeletes = {};
@@ -536,7 +535,7 @@ async function pushBatchedChanges(
   // If we haven't thrown by now, we're 100% successful writing all rows. Now
   // we attempt an atomic write that will integrate us into the main backup.
   try {
-    await runTransaction(getFirestore(), async trans => {
+    await runTransaction(baseDoc.firestore, async trans => {
       const date = new Date().toISOString();
       const baseUpdate: Omit<MelonFireBaseDoc, "melonDeletes"> = {
         melonBatchTokens: {
@@ -583,7 +582,7 @@ async function pushBatchedChanges(
         iBlock * MAX_TRANSACTION_WRITES,
         (iBlock + 1) * MAX_TRANSACTION_WRITES,
       );
-      const batch = writeBatch(getFirestore());
+      const batch = writeBatch(baseDoc.firestore);
 
       for (const ref of block) {
         batch.delete(ref);
@@ -632,14 +631,14 @@ class BatchWriter {
 
   constructor(doc: DocumentReference, revision: number) {
     this.doc = doc;
-    this.batch = writeBatch(getFirestore());
+    this.batch = writeBatch(this.doc.firestore);
     this.count = 0;
     this.revision = revision;
   }
 
   private async flushBatch() {
     await this.batch.commit();
-    this.batch = writeBatch(getFirestore());
+    this.batch = writeBatch(this.doc.firestore);
     this.count = 0;
   }
 
