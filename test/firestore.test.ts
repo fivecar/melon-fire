@@ -7,126 +7,80 @@ import {
   initializeTestApp as mockInitializeTestApp,
 } from "@firebase/rules-unit-testing";
 import { afterAll, describe, expect, jest, test } from "@jest/globals";
-import { ReactNativeFirebase } from "@react-native-firebase/app";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  getFirestore,
+} from "@react-native-firebase/firestore";
 import { exportsForTesting } from "../index";
 
-let activeApp: ReactNativeFirebase.FirebaseApp;
-
-// Wrap a snapshot to convert .exists property to .exists() method
-// to match @react-native-firebase/firestore v18+ API
-function mockWrapSnapshot(snap: any): any {
-  const existsValue = snap.exists;
-  return new Proxy(snap, {
-    get(target, prop) {
-      if (prop === "exists") {
-        return () => existsValue;
-      }
-      if (prop === "ref") {
-        return mockWrapDocRef(target.ref);
-      }
-      return target[prop];
-    },
-  });
-}
-
-// Create a proxy-based wrapper for firestore to avoid mutation issues
-function mockWrapFirestore(fs: any): any {
-  return new Proxy(fs, {
-    get(target, prop) {
-      if (prop === "collection") {
-        return (path: string) => mockWrapCollection(target.collection(path));
-      }
-      if (prop === "batch") {
-        return () => target.batch();
-      }
-      if (prop === "runTransaction") {
-        return target.runTransaction.bind(target);
-      }
-      return target[prop];
-    },
-  });
-}
-
-function mockWrapCollection(col: any): any {
-  return new Proxy(col, {
-    get(target, prop) {
-      if (prop === "doc") {
-        return (path: string) => mockWrapDocRef(target.doc(path));
-      }
-      if (prop === "get") {
-        return async () => {
-          const snapshot = await target.get();
-          return {
-            ...snapshot,
-            docs: snapshot.docs.map(mockWrapSnapshot),
-          };
-        };
-      }
-      if (prop === "where") {
-        return (...args: any[]) => mockWrapQuery(target.where(...args));
-      }
-      return target[prop];
-    },
-  });
-}
-
-function mockWrapQuery(query: any): any {
-  return new Proxy(query, {
-    get(target, prop) {
-      if (prop === "get") {
-        return async () => {
-          const snapshot = await target.get();
-          return {
-            ...snapshot,
-            docs: snapshot.docs.map(mockWrapSnapshot),
-          };
-        };
-      }
-      if (prop === "where") {
-        return (...args: any[]) => mockWrapQuery(target.where(...args));
-      }
-      if (prop === "orderBy") {
-        return (...args: any[]) => mockWrapQuery(target.orderBy(...args));
-      }
-      return target[prop];
-    },
-  });
-}
-
-function mockWrapDocRef(doc: any): any {
-  return new Proxy(doc, {
-    get(target, prop) {
-      if (prop === "get") {
-        return async () => {
-          const snapshot = await target.get();
-          return mockWrapSnapshot(snapshot);
-        };
-      }
-      if (prop === "collection") {
-        return (path: string) => mockWrapCollection(target.collection(path));
-      }
-      return target[prop];
-    },
-  });
-}
-
+// Implements the subset of the @react-native-firebase/firestore v26 modular API
+// that melon-fire uses, on top of the namespaced web SDK exposed by
+// @firebase/rules-unit-testing (which talks to the Firestore emulator).
 jest.mock("@react-native-firebase/firestore", () => {
-  const mainApp = mockInitializeTestApp({ projectId: PROJECT_ID, auth: null });
-  const wrappedFirestore = mockWrapFirestore(mainApp.firestore());
+  const db = mockInitializeTestApp({
+    projectId: PROJECT_ID,
+    auth: null,
+  }).firestore();
 
-  // Wrap activeApp so its .firestore() returns wrapped firestore
-  activeApp = new Proxy(mainApp, {
-    get(target, prop) {
-      if (prop === "firestore") {
-        return () => wrappedFirestore;
-      }
-      return (target as any)[prop];
-    },
-  }) as unknown as ReactNativeFirebase.FirebaseApp;
+  // RNFB snapshots expose exists() as a method; the web v8 SDK uses a property.
+  function wrapSnapshot(snap: any): any {
+    return new Proxy(snap, {
+      get(target, prop) {
+        if (prop === "exists") {
+          const existsValue = target.exists;
+          return () => existsValue;
+        }
+        const value = target[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  // parent is a Firestore, CollectionReference or DocumentReference
+  function docFn(parent: any, ...segments: string[]): any {
+    if (segments.length === 0) {
+      return parent.doc(); // auto-id under a CollectionReference
+    }
+    if (typeof parent.doc === "function") {
+      return parent.doc(segments.join("/"));
+    }
+    // DocumentReference: no .doc(), so descend through a collection first
+    return parent
+      .collection(segments[0])
+      .doc(segments.slice(1).join("/"));
+  }
 
   return {
     __esModule: true,
-    default: () => wrappedFirestore,
+    getFirestore: () => db,
+    doc: docFn,
+    collection: (parent: any, ...segments: string[]) =>
+      parent.collection(segments.join("/")),
+    query: (q: any, ...constraints: Array<(q: any) => any>) =>
+      constraints.reduce((acc, constraint) => constraint(acc), q),
+    where:
+      (...args: any[]) =>
+      (q: any) =>
+        q.where(...args),
+    orderBy:
+      (...args: any[]) =>
+      (q: any) =>
+        q.orderBy(...args),
+    getDoc: async (ref: any) => wrapSnapshot(await ref.get()),
+    getDocs: async (q: any) => {
+      const snap = await q.get();
+      return {
+        empty: snap.empty,
+        size: snap.size,
+        docs: snap.docs.map(wrapSnapshot),
+      };
+    },
+    runTransaction: (firestore: any, fn: (trans: any) => Promise<any>) =>
+      firestore.runTransaction(fn),
+    writeBatch: (firestore: any) => firestore.batch(),
   };
 });
 jest.setTimeout(15000);
@@ -151,8 +105,7 @@ afterAll(async () => {
 
 describe("Melon Fire", () => {
   test("performs first pull", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("alpha");
+    const profile = doc(getFirestore(), "backups", "alpha");
     const res = await pullChanges(["entries"], profile, { lastPulledAt: null });
 
     expect(res.changes.entries).toBeDefined();
@@ -163,8 +116,7 @@ describe("Melon Fire", () => {
   });
 
   test("pushes on the first time", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("bravo");
+    const profile = doc(getFirestore(), "backups", "bravo");
 
     await pushChanges(profile, {
       changes: {
@@ -177,7 +129,7 @@ describe("Melon Fire", () => {
       lastPulledAt: 1,
     });
 
-    const entries = await profile.collection("entries").get();
+    const entries = await getDocs(collection(profile, "entries"));
 
     expect(entries.docs.length).toBe(1);
     expect(entries.docs[0].data().id).toBe("aaa");
@@ -185,8 +137,7 @@ describe("Melon Fire", () => {
   });
 
   test("pulls first pushed changes", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("charlie");
+    const profile = doc(getFirestore(), "backups", "charlie");
 
     await pushChanges(profile, {
       changes: {
@@ -212,8 +163,7 @@ describe("Melon Fire", () => {
   });
 
   test("pulls two pushed changes", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("delta");
+    const profile = doc(getFirestore(), "backups", "delta");
 
     await pushChanges(profile, {
       changes: {
@@ -250,8 +200,7 @@ describe("Melon Fire", () => {
   });
 
   test("pulls only requested changes since last pull", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("echo");
+    const profile = doc(getFirestore(), "backups", "echo");
 
     await pushChanges(profile, {
       changes: {
@@ -283,8 +232,7 @@ describe("Melon Fire", () => {
   });
 
   test("deletes record before sending changes back", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("foxtrot");
+    const profile = doc(getFirestore(), "backups", "foxtrot");
 
     await pushChanges(profile, {
       changes: {
@@ -360,8 +308,7 @@ describe("Melon Fire", () => {
   });
 
   test("pushes batches correctly", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("golf");
+    const profile = doc(getFirestore(), "backups", "golf");
     const created = [];
     const totalCreated = 2480;
 
@@ -380,14 +327,14 @@ describe("Melon Fire", () => {
       lastPulledAt: 1,
     });
 
-    const batches = await profile.collection("melonBatches").get();
+    const batches = await getDocs(collection(profile, "melonBatches"));
     expect(batches.docs.length).toBe(1);
 
     const batchRef = batches.docs[0];
     const batchDoc = batchRef.data();
     expect(batchDoc.melonLatestRevision).toBe(1);
 
-    const creates = await batchRef.ref.collection("entries").get();
+    const creates = await getDocs(collection(batchRef.ref, "entries"));
     expect(creates.docs.length).toBe(totalCreated);
 
     const res = await pullChanges(["entries"], profile, { lastPulledAt: null });
@@ -398,8 +345,7 @@ describe("Melon Fire", () => {
   });
 
   test("deletes rows from baseDoc", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("hotel");
+    const profile = doc(getFirestore(), "backups", "hotel");
 
     await pushChanges(profile, {
       changes: {
@@ -433,13 +379,12 @@ describe("Melon Fire", () => {
     expect(res.changes.entries.deleted.length).toBe(1);
     expect(res.changes.entries.deleted[0]).toBe("bbb");
 
-    const delSnap = await profile.collection("entries").doc("bbb").get();
+    const delSnap = await getDoc(doc(profile, "entries", "bbb"));
     expect(delSnap.exists()).toBe(false);
   });
 
   test("deletes rows from batches", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("india");
+    const profile = doc(getFirestore(), "backups", "india");
     const created = [];
     const totalCreated = 1001;
 
@@ -459,7 +404,7 @@ describe("Melon Fire", () => {
     });
 
     const mid = await pullChanges(["entries"], profile, { lastPulledAt: null });
-    const batches = await profile.collection("melonBatches").get();
+    const batches = await getDocs(collection(profile, "melonBatches"));
 
     expect(batches.docs.length).toBe(1);
     expect(mid.changes.entries.updated.length).toBe(totalCreated);
@@ -475,7 +420,7 @@ describe("Melon Fire", () => {
       lastPulledAt: mid.timestamp,
     });
 
-    const dels = await profile.collection("melonDeletes").get();
+    const dels = await getDocs(collection(profile, "melonDeletes"));
 
     expect(dels.docs.length).toBe(1);
 
@@ -489,10 +434,7 @@ describe("Melon Fire", () => {
     expect(res.changes.entries.updated.length).toBe(0);
 
     // Now check that firestore doesn't have 218 anymore
-    const delSnap = await batches.docs[0].ref
-      .collection("entries")
-      .doc("218")
-      .get();
+    const delSnap = await getDoc(doc(batches.docs[0].ref, "entries", "218"));
     expect(delSnap.exists()).toBe(false);
 
     // Finally verify that a pull from the beginning of time won't even show
@@ -509,8 +451,7 @@ describe("Melon Fire", () => {
   });
 
   test("handles invalid firestore IDs correctly", async () => {
-    const firestore = activeApp.firestore();
-    const profile = firestore.collection("backups").doc("juliet");
+    const profile = doc(getFirestore(), "backups", "juliet");
     const unencodedID =
       "https://rss.art19.com/smartless-gid://art19-episode-locator";
 

@@ -6,8 +6,21 @@ import {
   SyncPushArgs,
   synchronize,
 } from "@nozbe/watermelondb/sync";
-import firestore, {
-  FirebaseFirestoreTypes,
+import {
+  collection,
+  doc,
+  DocumentData,
+  DocumentReference,
+  DocumentSnapshot,
+  getDoc,
+  getDocs,
+  getFirestore,
+  orderBy,
+  query,
+  runTransaction,
+  where,
+  writeBatch,
+  WriteBatch,
 } from "@react-native-firebase/firestore";
 
 interface MelonFireRoot {
@@ -53,7 +66,7 @@ type ChangeRecordWithWatermelonInternals = ChangeRecord &
   WatermelonClientInternals;
 
 interface DeleteRef {
-  ref: FirebaseFirestoreTypes.DocumentReference;
+  ref: DocumentReference;
   id: string;
 }
 
@@ -90,7 +103,7 @@ const MIN_REVISION = 1;
 
 export async function syncMelonFire(
   database: Database,
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
 ) {
   // WatermelonDB docs say to attempt sync twice, because a failure the first
   // time can be resolved by re-pulling and reattempting again.
@@ -104,7 +117,7 @@ export async function syncMelonFire(
 
 async function sync(
   database: Database,
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
 ) {
   return await synchronize({
     database,
@@ -138,12 +151,12 @@ push at the same timestamp as when you last pulled.
 */
 async function pullChanges(
   tables: string[],
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
   params: SyncPullArgs,
 ): Promise<SyncPullResult> {
   const { lastPulledAt, schemaVersion, migration } = params;
   const startRevision = lastPulledAt === null ? MIN_REVISION : lastPulledAt;
-  const baseSnap = await baseDoc.get();
+  const baseSnap = await getDoc(baseDoc);
   const [endRevision, batchTokens] = revisionFromBaseSnap(baseSnap);
   // All ids added to changeMap are url-decoded
   const changeMap: ChangeLoadMap = {};
@@ -170,11 +183,11 @@ async function pullChanges(
     }
     if (end === start) {
       const token = batchTokens[end.toString()];
-      const root = baseDoc.collection(BATCH_COLLECTION).doc(token);
+      const root = doc(baseDoc, BATCH_COLLECTION, token);
 
       end++; // End is exclusive, so you need to bump it before merging below
       const [rootSnap] = await Promise.all([
-        root.get(),
+        getDoc(root),
         mergeCreatesAndUpdates(root, start, end, tables, changeMap),
       ]);
 
@@ -189,11 +202,13 @@ async function pullChanges(
       await mergeCreatesAndUpdates(baseDoc, start, end, tables, changeMap);
 
       // Now add deletions from all relevant revisions.
-      const snaps = await baseDoc
-        .collection(DELETE_COLLECTION)
-        .where("revision", ">=", start)
-        .where("revision", "<", end)
-        .get();
+      const snaps = await getDocs(
+        query(
+          collection(baseDoc, DELETE_COLLECTION),
+          where("revision", ">=", start),
+          where("revision", "<", end),
+        ),
+      );
       const records = snaps.docs.map(doc => doc.data() as DeleteRecord);
 
       for (const record of records) {
@@ -228,7 +243,7 @@ async function pullChanges(
 // Adds to changeMap allchanges from a root doc (whether that's baseDoc or a
 // batchDoc). All returned ids are already url-decoded.
 async function mergeCreatesAndUpdates(
-  root: FirebaseFirestoreTypes.DocumentReference,
+  root: DocumentReference,
   startRevision: number,
   endRevision: number, // exclusive!
   tables: string[],
@@ -236,18 +251,20 @@ async function mergeCreatesAndUpdates(
 ) {
   await Promise.all(
     tables.map(async table => {
-      const refs = await root
-        .collection(table)
-        .where("melonFireRevision", ">=", startRevision)
-        .where("melonFireRevision", "<", endRevision)
-        .orderBy("melonFireRevision")
-        .get();
+      const refs = await getDocs(
+        query(
+          collection(root, table),
+          where("melonFireRevision", ">=", startRevision),
+          where("melonFireRevision", "<", endRevision),
+          orderBy("melonFireRevision"),
+        ),
+      );
 
-      refs.docs.forEach(doc => {
+      refs.docs.forEach(snap => {
         // We shouldn't have uploaded those internals... but now we have to
         // accept that our type, coming out of the cloud, will always have the
         // possibility of having internals.
-        const storedData = doc.data() as ChangeRecordWithWatermelonInternals;
+        const storedData = snap.data() as ChangeRecordWithWatermelonInternals;
         const rec = removeMelonFields(removeWatermelonInternals(storedData));
 
         changeMap[table].updated[decodeURIComponent(rec.id)] = rec;
@@ -285,7 +302,7 @@ transaction, since its saves space; but we pushBatchedChanges otherwise, to
 preserve atomicity.
 */
 async function pushChanges(
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
   params: SyncPushArgs,
 ) {
   const delRefs = await findDeleteRefs(baseDoc, params);
@@ -304,7 +321,7 @@ async function pushChanges(
  * returns refs with url-encoded ids!
  */
 async function findDeleteRefs(
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
   params: SyncPushArgs,
 ): Promise<AllDeleteRefs> {
   const delRefs: AllDeleteRefs = {};
@@ -312,9 +329,7 @@ async function findDeleteRefs(
   for (const table of Object.keys(params.changes)) {
     const deletedIds = params.changes[table].deleted;
     const baseSnaps = await Promise.all(
-      deletedIds.map(id =>
-        baseDoc.collection(table).doc(encodeURIComponent(id)).get(),
-      ),
+      deletedIds.map(id => getDoc(doc(baseDoc, table, encodeURIComponent(id)))),
     );
     const baseExists = baseSnaps.filter(snap => snap.exists());
 
@@ -328,17 +343,17 @@ async function findDeleteRefs(
     // We need to search through all past batches, even though we know
     // params.lastPulledAt, because the record could have been created from
     // anytime back. This isn't awesome.
-    const batchSnaps = await baseDoc.collection(BATCH_COLLECTION).get();
+    const batchSnaps = await getDocs(collection(baseDoc, BATCH_COLLECTION));
 
     // Next, check for deleted rows in all relevant batches. Remember that the
     // same row can occur in multiple batches (e.g. multiple updates).
     const delInBatchPromises: Promise<
-      FirebaseFirestoreTypes.DocumentSnapshot<FirebaseFirestoreTypes.DocumentData>
+      DocumentSnapshot<DocumentData>
     >[] = [];
     deletedIds.forEach(id =>
       delInBatchPromises.push(
         ...batchSnaps.docs.map(batch =>
-          batch.ref.collection(table).doc(encodeURIComponent(id)).get(),
+          getDoc(doc(batch.ref, table, encodeURIComponent(id))),
         ),
       ),
     );
@@ -362,7 +377,7 @@ async function findDeleteRefs(
 }
 
 function revisionFromBaseSnap(
-  snap: FirebaseFirestoreTypes.DocumentSnapshot<FirebaseFirestoreTypes.DocumentData>,
+  snap: DocumentSnapshot<DocumentData>,
 ): [number, MelonBatchTokens | undefined] {
   const existingDoc = snap.data() as MelonFireBaseDoc | undefined;
   const revision = existingDoc?.melonLatestRevision
@@ -378,13 +393,13 @@ a revision number so that we can pull them efficiently later.
 Requires that params.changes contains less than MAX_TRANSACTION_WRITES!
  */
 async function pushAllChanges(
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
   params: SyncPushArgs,
   delRefs: AllDeleteRefs,
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
 
-  return await firestore().runTransaction(async trans => {
+  return await runTransaction(getFirestore(), async trans => {
     const baseSnap = await trans.get(baseDoc);
     const [revision] = revisionFromBaseSnap(baseSnap);
     const tableDeletes: TableDeletes = {};
@@ -410,7 +425,7 @@ async function pushAllChanges(
         // particular row/doc exists; they might be sequestered in a tokened
         // batch.
         trans.set(
-          baseDoc.collection(table).doc(encodeURIComponent(rec.id)),
+          doc(baseDoc, table, encodeURIComponent(rec.id)),
           rec,
         );
       }
@@ -432,7 +447,7 @@ async function pushAllChanges(
         revision,
         deletes: tableDeletes,
       };
-      trans.set(baseDoc.collection(DELETE_COLLECTION).doc(), record);
+      trans.set(doc(collection(baseDoc, DELETE_COLLECTION)), record);
     }
 
     const updatedBase: Omit<MelonFireBaseDoc, "melonBatchTokens"> = {
@@ -472,13 +487,13 @@ copies).
 2. It complicates pullChanges, which must now merge these batches intelligently.
 */
 async function pushBatchedChanges(
-  baseDoc: FirebaseFirestoreTypes.DocumentReference,
+  baseDoc: DocumentReference,
   params: SyncPushArgs,
   delRefs: AllDeleteRefs,
 ): Promise<void> {
   const { lastPulledAt, changes } = params;
-  const batchDoc = baseDoc.collection(BATCH_COLLECTION).doc();
-  const baseSnap = await baseDoc.get();
+  const batchDoc = doc(collection(baseDoc, BATCH_COLLECTION));
+  const baseSnap = await getDoc(baseDoc);
   const [revision, batchTokens] = revisionFromBaseSnap(baseSnap);
 
   let batch = new BatchWriter(batchDoc, revision);
@@ -521,7 +536,7 @@ async function pushBatchedChanges(
   // If we haven't thrown by now, we're 100% successful writing all rows. Now
   // we attempt an atomic write that will integrate us into the main backup.
   try {
-    await firestore().runTransaction(async trans => {
+    await runTransaction(getFirestore(), async trans => {
       const date = new Date().toISOString();
       const baseUpdate: Omit<MelonFireBaseDoc, "melonDeletes"> = {
         melonBatchTokens: {
@@ -555,9 +570,9 @@ async function pushBatchedChanges(
     const rollbackRefs = [];
 
     for (const table of Object.keys(changes)) {
-      const writtenDocs = await batchDoc.collection(table).get();
+      const writtenDocs = await getDocs(collection(batchDoc, table));
 
-      rollbackRefs.push(writtenDocs.docs.map(doc => doc.ref));
+      rollbackRefs.push(writtenDocs.docs.map(snap => snap.ref));
     }
     for (
       let iBlock = 0;
@@ -568,7 +583,7 @@ async function pushBatchedChanges(
         iBlock * MAX_TRANSACTION_WRITES,
         (iBlock + 1) * MAX_TRANSACTION_WRITES,
       );
-      const batch = firestore().batch();
+      const batch = writeBatch(getFirestore());
 
       for (const ref of block) {
         batch.delete(ref);
@@ -610,21 +625,21 @@ function countChanges(
 // when you're done. You must flush, because there might be an unwritten partial
 // batch.
 class BatchWriter {
-  private batch: FirebaseFirestoreTypes.WriteBatch;
+  private batch: WriteBatch;
   private count: number;
-  private doc: FirebaseFirestoreTypes.DocumentReference;
+  private doc: DocumentReference;
   private revision: number;
 
-  constructor(doc: FirebaseFirestoreTypes.DocumentReference, revision: number) {
+  constructor(doc: DocumentReference, revision: number) {
     this.doc = doc;
-    this.batch = firestore().batch();
+    this.batch = writeBatch(getFirestore());
     this.count = 0;
     this.revision = revision;
   }
 
   private async flushBatch() {
     await this.batch.commit();
-    this.batch = firestore().batch();
+    this.batch = writeBatch(getFirestore());
     this.count = 0;
   }
 
@@ -650,7 +665,7 @@ class BatchWriter {
     return this;
   }
 
-  public async deleted(refs: FirebaseFirestoreTypes.DocumentReference[]) {
+  public async deleted(refs: DocumentReference[]) {
     const headCount = Math.min(
       refs.length,
       MAX_TRANSACTION_WRITES - this.count,
@@ -697,7 +712,7 @@ class BatchWriter {
    * doesn't contain those internals.
    */
   private async write(table: string, rec: ChangeRecord) {
-    const ref = this.doc.collection(table).doc(encodeURIComponent(rec.id));
+    const ref = doc(this.doc, table, encodeURIComponent(rec.id));
     const data: ChangeRecord = {
       ...rec,
       melonFireRevision: this.revision,
