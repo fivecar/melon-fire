@@ -7,6 +7,7 @@ import {
   initializeTestApp as mockInitializeTestApp,
 } from "@firebase/rules-unit-testing";
 import { afterAll, describe, expect, jest, test } from "@jest/globals";
+import http from "http";
 import {
   collection,
   doc,
@@ -101,6 +102,11 @@ afterAll(async () => {
   // Delete all the FirebaseApp instances created during testing
   // Note: this does not affect or clear any data
   await Promise.all(apps().map(app => app.delete()));
+
+  // clearFirestoreData() talks to the emulator via the `request` library, which
+  // uses Node's global HTTP agent. Since Node 19 that agent keeps sockets alive,
+  // so close the pooled socket rather than leave it open after the suite.
+  http.globalAgent.destroy();
 });
 
 describe("Melon Fire", () => {
