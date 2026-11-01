@@ -1,6 +1,6 @@
 {
   "name": "melon-fire",
-  "version": "3.0.1",
+  "version": "4.0.0",
   "description": "WatermelonDB Firestore sync",
   "main": "dist/index.js",
   "module": "dist/index.modern.js",
